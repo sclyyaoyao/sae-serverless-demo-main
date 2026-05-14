@@ -1,0 +1,31 @@
+services:
+  suke-api:
+    build:
+      context: ./suke-api
+    container_name: suke-api
+    restart: unless-stopped
+    environment:
+      DIFY_BASE_URL: ${DIFY_BASE_URL:-http://host.docker.internal:5001}
+      DIFY_API_KEY: ${DIFY_API_KEY:-}
+      DIFY_USER: ${DIFY_USER:-suke-api}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-600}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - suke
+
+  suke-front:
+    build:
+      context: ./suke-front
+    container_name: suke-front
+    restart: unless-stopped
+    depends_on:
+      - suke-api
+    ports:
+      - "${SUKE_HTTP_PORT:-8080}:80"
+    networks:
+      - suke
+
+networks:
+  suke:
+    name: suke

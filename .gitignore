@@ -1,0 +1,43 @@
+# 环境变量与密钥（示例文件除外）
+.env
+.env.local
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+**/credentials.json
+**/secrets/
+
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+build/
+coverage/
+.npm/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+
+# 日志与临时文件
+logs/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+*.sw?
