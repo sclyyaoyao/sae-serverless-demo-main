@@ -1,4 +1,5 @@
 import re
+from posixpath import normpath
 from typing import Annotated, Any
 from urllib.parse import unquote, urlparse
 
@@ -168,12 +169,86 @@ def structure_output(value: Any) -> dict[str, Any]:
     return {"markdown": markdown, "previewText": preview, "files": files}
 
 
+def _proxy_allowed_netlocs() -> set[str]:
+    """白名单 netloc（小写），来自 DIFY_BASE_URL、DIFY_FILES_BASE_URL、FILES_ALLOWED_HOSTS。"""
+    out: set[str] = set()
+    for raw in (
+        str(settings.dify_base_url),
+        str(settings.dify_files_base_url) if settings.dify_files_base_url else "",
+    ):
+        if not raw:
+            continue
+        nl = urlparse(raw).netloc
+        if nl:
+            out.add(nl.lower())
+    for part in settings.files_allowed_hosts.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "://" in part:
+            nl = urlparse(part).netloc
+        else:
+            nl = part
+        if nl:
+            out.add(nl.lower())
+    return out
+
+
+def _proxy_allowed_hostnames() -> set[str]:
+    """与 Dify 相关的 hostname（小写），用于 API 与文件服务同 IP、不同端口场景。"""
+    hosts: set[str] = set()
+    for raw in (
+        str(settings.dify_base_url),
+        str(settings.dify_files_base_url) if settings.dify_files_base_url else "",
+    ):
+        if not raw:
+            continue
+        h = urlparse(raw).hostname
+        if h:
+            hosts.add(h.lower())
+    for part in settings.files_allowed_hosts.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "://" in part:
+            h = urlparse(part).hostname
+        else:
+            # host、host:port 或未写 scheme 的 URL 片段
+            h = urlparse(f"http://{part}").hostname
+        if h:
+            hosts.add(h.lower())
+    return hosts
+
+
+def _safe_dify_file_path(path: str) -> bool:
+    """限制为 Dify 文件路径，避免 /files/../ 绕过后缀校验（SSRF）。"""
+    p = normpath(path or "/")
+    if p in (".", "/"):
+        return False
+    return p == "/files" or p.startswith("/files/")
+
+
 def allowed_proxy_url(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return False
-    base = urlparse(str(settings.dify_base_url))
-    return bool(parsed.netloc) and parsed.netloc == base.netloc
+    if not parsed.hostname or not parsed.netloc:
+        return False
+    if not _safe_dify_file_path(parsed.path):
+        return False
+
+    netlocs = _proxy_allowed_netlocs()
+    hostnames = _proxy_allowed_hostnames()
+
+    netloc_l = parsed.netloc.lower()
+    if netloc_l in netlocs:
+        return True
+
+    host_l = parsed.hostname.lower()
+    if host_l in hostnames:
+        return True
+
+    return False
 
 
 def parse_filename_from_cd(value: str | None) -> str | None:
@@ -199,7 +274,9 @@ async def health() -> dict[str, str]:
 
 @app.get("/api/files/proxy")
 async def proxy_dify_file(url: str) -> Response:
-    """代理下载 Dify 域名下的文件，避免跨域与 Cookie 限制；URL 必须与 DIFY_BASE_URL 同 host。"""
+    """代理下载 Dify 允许域名下的文件，避免跨域与 Cookie 限制。
+    允许的源：DIFY_BASE_URL / DIFY_FILES_BASE_URL / FILES_ALLOWED_HOSTS 的 netloc，
+    或与上述配置相同 hostname 的不同端口（路径须为 /files/...）。"""
     if not url:
         raise HTTPException(status_code=400, detail="缺少 url 参数")
     if not allowed_proxy_url(url):
@@ -234,6 +311,17 @@ async def proxy_dify_file(url: str) -> Response:
     )
 
 
+def dify_workflow_file_type(upload: UploadFile) -> str:
+    """与 Dify 工作流 file 输入的 type 字段对齐：document / image。"""
+    ct = (upload.content_type or "").lower()
+    name = (upload.filename or "").lower()
+    if ct.startswith("image/"):
+        return "image"
+    if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg")):
+        return "image"
+    return "document"
+
+
 async def upload_to_dify(client: httpx.AsyncClient, file: UploadFile) -> dict:
     content = await file.read()
     if not content:
@@ -263,27 +351,26 @@ async def upload_to_dify(client: httpx.AsyncClient, file: UploadFile) -> dict:
 
 @app.post("/api/evaluations/run")
 async def run_evaluation(
-    files: Annotated[list[UploadFile], File(description="成果/专利相关文件")],
+    file: Annotated[
+        UploadFile,
+        File(description="专利/成果文件（单文件；与工作流变量 patent_files 的「单个文件」类型一致）"),
+    ],
     certify: Annotated[str, Form()] = "国内领先",
     award: Annotated[str, Form()] = "无",
 ) -> dict:
-    if not files:
-        raise HTTPException(status_code=400, detail="请上传至少一个文件")
-
     timeout = httpx.Timeout(settings.request_timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        uploaded_files = [await upload_to_dify(client, file) for file in files]
+        uploaded = await upload_to_dify(client, file)
+        wf_type = dify_workflow_file_type(file)
 
         workflow_payload = {
             "inputs": {
-                "patent_files": [
-                    {
-                        "type": "document",
-                        "transfer_method": "local_file",
-                        "upload_file_id": item["id"],
-                    }
-                    for item in uploaded_files
-                ],
+                # Dify 工作流 start 节点 type=file 时须传入单个文件对象，不可使用数组。
+                "patent_files": {
+                    "type": wf_type,
+                    "transfer_method": "local_file",
+                    "upload_file_id": uploaded["id"],
+                },
                 "certify": certify or "国内领先",
                 "award": award or "无",
             },

@@ -9,7 +9,7 @@
 ## 1. 准备 Dify
 
 1. 部署 Dify。
-2. 在 Dify 控制台导入仓库根目录的 [`suke-2.1.yml`](../suke-2.1.yml)（Dify DSL 导出）工作流。
+2. 在 Dify 控制台导入项目根目录的 `suke-2.1.yml` 工作流。
 3. 发布工作流。
 4. 创建工作流 API Key。
 
@@ -42,7 +42,7 @@ DIFY_BASE_URL=http://10.0.0.12:5001
 在项目根目录执行：
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 访问：

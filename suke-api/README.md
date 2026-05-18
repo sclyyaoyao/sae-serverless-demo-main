@@ -4,7 +4,7 @@
 
 - 隐藏 Dify API Key。
 - 上传用户文件到 Dify `/v1/files/upload`。
-- 使用 `upload_file_id` 运行 Dify workflow。
+- 使用 `upload_file_id` 运行 Dify workflow；`inputs.patent_files` 须为**单个**文件对象（与 DSL 中 `type: file` 一致），不能传数组。
 - 向前端返回评估报告和转化建议。
 
 ## 本地启动
@@ -31,8 +31,8 @@ REQUEST_TIMEOUT_SECONDS=600
 
 ### `POST /api/evaluations/run`
 
-表单字段：
+表单字段（`multipart/form-data`）：
 
-- `files`：一个或多个 PDF/DOC/DOCX/XLS/XLSX 文件。
-- `certify`：成果鉴定评价结论。
-- `award`：科技奖励获奖情况。
+- `file`：单份专利/成果文件（对应 Dify 工作流变量 `patent_files`）。
+- `certify`：成果鉴定评价结论（对应 `certify`）。
+- `award`：科技奖励获奖情况（对应 `award`）。

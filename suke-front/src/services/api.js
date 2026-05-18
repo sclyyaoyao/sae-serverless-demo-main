@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { extractStructuredFromApiResponse } from '../utils/radarParse';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -52,6 +53,74 @@ export function normalizeOutputBlock(raw) {
   };
 }
 
+function normalizeFileCandidate(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const url = item.url || item.remote_url || item.preview_url;
+  if (!url) return null;
+  return {
+    name: String(item.name || item.filename || item.id || '下载文件'),
+    url: String(url),
+  };
+}
+
+function collectFilesFromAny(value, out = []) {
+  const direct = normalizeFileCandidate(value);
+  if (direct) out.push(direct);
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFilesFromAny(item, out));
+  } else if (value && typeof value === 'object') {
+    for (const key of ['files', 'attachments', 'documents']) {
+      collectFilesFromAny(value[key], out);
+    }
+  }
+
+  return out;
+}
+
+function uniqueFiles(files) {
+  const seen = new Set();
+  return files.filter((file) => {
+    if (!file?.url || seen.has(file.url)) return false;
+    seen.add(file.url);
+    return true;
+  });
+}
+
+function classifyUnifiedFiles(files) {
+  const evaluation = [];
+  const decision = [];
+  const unknown = [];
+  const decisionRe = /(决策|转化|策略|decision|conversion|strategy)/i;
+  const evaluationRe = /(评估|评价|评审|报告|evaluation|assessment|report)/i;
+
+  uniqueFiles(files).forEach((file) => {
+    const name = file.name || '';
+    if (decisionRe.test(name)) {
+      decision.push(file);
+    } else if (evaluationRe.test(name)) {
+      evaluation.push(file);
+    } else {
+      unknown.push(file);
+    }
+  });
+
+  return {
+    evaluation: evaluation.length ? evaluation : unknown,
+    decision,
+  };
+}
+
+function extractUnifiedFiles(data) {
+  const outputs = data?.outputs || data?.raw?.data?.outputs || data?.raw?.outputs;
+  return uniqueFiles([
+    ...collectFilesFromAny(data?.files),
+    ...collectFilesFromAny(outputs?.files),
+    ...collectFilesFromAny(outputs?.attachments),
+    ...collectFilesFromAny(data?.raw?.data?.files),
+  ]);
+}
+
 /**
  * 展开正文前去掉「仅链接」行，并把 [label](url) 换成可读文字，避免重复暴露 URL。
  */
@@ -69,23 +138,32 @@ export function markdownForDisplay(markdown) {
 }
 
 /**
- * 调用Dify工作流进行科技成果评估
- * @param {File[]} files - 专利文件数组
+ * 调用评估服务进行科技成果评估（当前流程仅接收单份上传材料）
+ * @param {import('antd').UploadFile[]} fileList - Ant Design Upload 的 fileList（仅取第一份）
  * @param {string} certify - 成果鉴定评价结论
  * @param {string} award - 科技奖励获奖情况
  * @param {Function} onProgress - 进度回调
+ * @param {{ signal?: AbortSignal }} [fetchOptions]
  * @returns {Promise<{evaluation: object, decision: object}>}
  */
-export async function runEvaluation(files, certify, award, onProgress) {
-  if (!files || files.length === 0) {
-    throw new Error('请上传至少一个专利文件');
+export async function runEvaluation(
+  fileList,
+  certify,
+  award,
+  onProgress,
+  fetchOptions = {}
+) {
+  if (!fileList || fileList.length === 0) {
+    throw new Error('请上传专利文件');
+  }
+  if (fileList.length > 1) {
+    throw new Error('当前评估工作流仅支持单个文件，请只保留一份专利文件后再试');
   }
 
   const formData = new FormData();
-
-  files.forEach((file) => {
-    formData.append('files', file.originFileObj || file);
-  });
+  const item = fileList[0];
+  const blob = item.originFileObj || item;
+  formData.append('file', blob);
 
   formData.append('certify', certify || '国内领先');
   formData.append('award', award || '无');
@@ -97,25 +175,39 @@ export async function runEvaluation(files, certify, award, onProgress) {
       `${API_BASE_URL}/api/evaluations/run`,
       formData,
       {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        },
-        timeout: 600000
+        // 勿手动设置 multipart Content-Type，需由浏览器带上 boundary
+        timeout: 600000,
+        signal: fetchOptions.signal,
       }
     );
 
     onProgress?.('评估完成');
 
+    const data = response.data;
+    const evaluation = normalizeOutputBlock(data.evaluation ?? data.outputs?.evaluation);
+    const decision = normalizeOutputBlock(data.decision ?? data.outputs?.decision);
+    const fallbackFiles = classifyUnifiedFiles(extractUnifiedFiles(data));
+    if (!evaluation.files.length && fallbackFiles.evaluation.length) {
+      evaluation.files = fallbackFiles.evaluation;
+    }
+    if (!decision.files.length && fallbackFiles.decision.length) {
+      decision.files = fallbackFiles.decision;
+    }
+
     return {
-      evaluation: normalizeOutputBlock(
-        response.data.evaluation ?? response.data.outputs?.evaluation
-      ),
-      decision: normalizeOutputBlock(
-        response.data.decision ?? response.data.outputs?.decision
-      ),
+      evaluation,
+      decision,
+      /** 若后端在顶层或 outputs 中返回雷达/分值字段，则供前端结构化展示（无则降级为正文解析） */
+      structuredDimensions: extractStructuredFromApiResponse(data),
     };
 
   } catch (error) {
+    const aborted =
+      axios.isCancel?.(error) ||
+      error?.code === 'ERR_CANCELED' ||
+      error?.name === 'CanceledError';
+    if (aborted) throw error;
+
     console.error('Dify API Error:', error);
     throw new Error(error.response?.data?.detail || error.message || '调用评估服务失败');
   }
